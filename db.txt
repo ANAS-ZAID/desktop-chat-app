@@ -1,0 +1,352 @@
+
+create database chat;
+go
+use chat;
+
+
+CREATE TABLE users (
+    phone INT PRIMARY KEY,
+    name NVARCHAR(255) NOT NULL UNIQUE,
+    password NVARCHAR(MAX) NOT NULL,
+    img NVARCHAR(MAX),
+    permission BIT DEFAULT(1),
+    active BIT DEFAULT(1),
+	 lastSeen DATETIME,
+    information NVARCHAR(MAX),
+    elesName NVARCHAR(255) NOT NULL UNIQUE,
+    publicType BIT NOT NULL,
+    userCode INT UNIQUE,
+   -- lastActive DATETIME,
+    CONSTRAINT chk_phone CHECK (
+        LEN(CAST(phone AS VARCHAR(15))) >= 9 AND
+        (CAST(phone AS VARCHAR(15)) LIKE '73%' OR 
+         CAST(phone AS VARCHAR(15)) LIKE '77%' OR
+         CAST(phone AS VARCHAR(15)) LIKE '70%' OR
+         CAST(phone AS VARCHAR(15)) LIKE '71%' OR
+         CAST(phone AS VARCHAR(15)) LIKE '78%' )
+    )
+);
+--alter TABLE users 
+--add lastSeen DATETIME,
+--add  active BIT DEFAULT(1)
+CREATE TABLE groups (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    name NVARCHAR(MAX),
+    img NVARCHAR(MAX),
+    createdDate DATETIME DEFAULT GETDATE()
+);
+
+CREATE INDEX idx_group_id ON groups (id);
+
+go
+CREATE TABLE memeparsGroups (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    userPhone INT,
+    groupId INT,
+    type NVARCHAR(20),
+    joinDate DATETIME DEFAULT GETDATE(),
+    CONSTRAINT FK_userPhone_users_phone FOREIGN KEY (userPhone) REFERENCES users(phone),
+    CONSTRAINT Fk_groupId_groups_id FOREIGN KEY (groupId) REFERENCES groups(id)
+);
+
+CREATE INDEX idx_userPhone_groupId ON memeparsGroups (userPhone, groupId);
+
+CREATE TABLE messages (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    containts NVARCHAR(500),
+    status NVARCHAR(20),
+    startDate DATETIME NOT NULL,
+    reciveDate DATETIME DEFAULT GETDATE(),
+    sendPhone INT,
+    recivePhone INT,
+    reciveGroupId INT,
+    CONSTRAINT FK_sendPhone_users_phone FOREIGN KEY (sendPhone) REFERENCES users(phone),
+    CONSTRAINT FK_recivePhone_users_phone FOREIGN KEY (recivePhone) REFERENCES users(phone),
+    CONSTRAINT Fk_reciveGroupId_groups_id FOREIGN KEY (reciveGroupId) REFERENCES groups(id)
+);
+
+CREATE INDEX idx_sendPhone_recivePhone ON messages (sendPhone, recivePhone);
+CREATE INDEX idx_reciveGroupId ON messages (reciveGroupId);
+CREATE INDEX idx_startDate ON messages (startDate);
+
+
+--لتخزين المرفقات بشكل منفصل
+CREATE TABLE MessageAttachments (
+    id INT PRIMARY KEY IDENTITY(1,1),
+    messageId INT,
+    attachmentType NVARCHAR(20), -- 'image', 'voice', 'video'
+    filePath NVARCHAR(MAX),
+    --fileSize INT,
+    uploadDate DATETIME DEFAULT GETDATE(),
+    CONSTRAINT FK_messageId_messages FOREIGN KEY (messageId) REFERENCES messages(id)
+);
+--تخزين حالات الحظر بين المستخدمين
+CREATE TABLE UserBlocked (
+    blockerPhone INT,
+    blockedPhone INT,
+    blockedDate DATETIME DEFAULT GETDATE(),
+    CONSTRAINT FK_blockerPhone_users FOREIGN KEY (blockerPhone) REFERENCES users(phone),
+    CONSTRAINT FK_blockedPhone_users FOREIGN KEY (blockedPhone) REFERENCES users(phone),
+    CONSTRAINT PK_UserBlocked PRIMARY KEY (blockerPhone, blockedPhone)
+);
+--لتتبع قراء الرسائل
+CREATE TABLE MessageReadStatus (
+    messageId INT,
+    userPhone INT,
+    readStatus BIT DEFAULT 0, -- 0 = unread, 1 = read
+    readDate DATETIME,
+    CONSTRAINT FK_messageId_messageReadStatus FOREIGN KEY (messageId) REFERENCES messages(id),
+    CONSTRAINT FK_userPhone_messageReadStatus FOREIGN KEY (userPhone) REFERENCES users(phone),
+    CONSTRAINT PK_MessageReadStatus PRIMARY KEY (messageId, userPhone)
+);
+--لتخزين حالة المستخدم (أونلاين/أوفلاين)
+CREATE TABLE UserStatus (
+    userPhone INT,
+    status NVARCHAR(20), -- 'online', 'offline', 'away'
+    lastUpdate DATETIME DEFAULT GETDATE(),
+    CONSTRAINT FK_userPhone_userStatus FOREIGN KEY (userPhone) REFERENCES users(phone)
+);
+--drop PROCEDURE GetChatList
+go
+--استرجاع قائمة المحادثات حسب المستخدم الحالي
+CREATE PROCEDURE GetChatList
+    @CurrentUserPhone INT
+AS
+BEGIN
+    WITH LatestMessages AS (
+        SELECT 
+            m.id,
+            m.containts AS MessageContent,
+            m.status AS Status,
+            m.startDate AS SentDate,
+            m.reciveDate AS ReceivedDate,
+            m.sendPhone AS SenderPhone,
+            m.recivePhone AS ReceiverPhone,
+            m.reciveGroupId AS ReceiverGroupId,
+            u1.name AS SenderName,
+            u2.name AS ReceiverName,
+			case 
+			when m.reciveGroupId is not NULL then m.reciveGroupId
+			else
+			m.recivePhone
+			end as  ChatId,
+            g.name AS GroupName,
+            g.img AS GroupImage,
+            u1.img AS SenderImage,
+			 u2.active AS ReceiverActive,
+			 u2.lastSeen AS lastSeen,
+            ROW_NUMBER() OVER (
+                PARTITION BY 
+                    CASE 
+                        WHEN m.reciveGroupId IS NOT NULL THEN m.reciveGroupId 
+                        ELSE LEAST(m.sendPhone, m.recivePhone) 
+                    END,
+                    CASE 
+                        WHEN m.reciveGroupId IS NOT NULL THEN m.reciveGroupId 
+                        ELSE GREATEST(m.sendPhone, m.recivePhone) 
+                    END
+                ORDER BY m.startDate DESC
+            ) AS RowNum
+        FROM messages m
+        LEFT JOIN users u1 ON m.sendPhone = u1.phone
+        LEFT JOIN users u2 ON m.recivePhone = u2.phone
+
+        LEFT JOIN groups g ON m.reciveGroupId = g.id
+        WHERE 
+            m.sendPhone = @CurrentUserPhone 
+            OR m.recivePhone = @CurrentUserPhone 
+            OR m.reciveGroupId IN (SELECT groupId FROM memeparsGroups WHERE userPhone = @CurrentUserPhone)
+    )
+    SELECT 
+        id, MessageContent, SentDate, SenderName, ReceiverName,ChatId, GroupName,
+
+        CASE 
+            WHEN ReceiverGroupId IS NOT NULL THEN GroupImage
+            ELSE SenderImage
+        END AS ChatImage,
+        CASE 
+            WHEN ReceiverGroupId IS NOT NULL THEN 'Group'
+            ELSE 'Private'
+        END AS MessageType
+    FROM LatestMessages
+    WHERE RowNum = 1
+    ORDER BY SentDate DESC;
+END;
+execute GetChatList @CurrentUserPhone=730000001;
+
+drop PROCEDURE GetMessagesByChatId
+go
+CREATE PROCEDURE GetMessagesByChatId
+    @CurrentUserPhone INT,
+    @ChatId INT
+AS
+BEGIN
+    SELECT 
+	    m.id,
+        m.containts AS MessageContent,
+        m.startDate AS SentDate,
+		m.reciveDate AS ReceivedDate,
+        u.elesName AS SenderName,
+        u.img AS SenderImage,
+        m.status AS Status,
+		m.sendPhone,
+		case
+		when m.reciveGroupId IS NOT NULL then m.reciveGroupId
+		else m.recivePhone 
+		end as receiverId,
+
+        CASE 
+            WHEN ma.attachmentType IS NOT NULL THEN ma.filePath
+            ELSE NULL
+        END AS Attachment
+    FROM messages m
+    LEFT JOIN users u ON m.sendPhone = u.phone
+    LEFT JOIN MessageAttachments ma ON m.id = ma.messageId
+    WHERE 
+        (  @CurrentUserPhone IN (m.sendPhone, m.recivePhone)	And m.recivePhone = @ChatId  )
+        OR (m.reciveGroupId = @ChatId and  m.reciveGroupId IN (SELECT groupId FROM memeparsGroups WHERE userPhone = @CurrentUserPhone))
+    ORDER BY m.startDate ASC;
+END;
+execute GetMessagesByChatId @CurrentUserPhone=730000001 , @ChatId=770000002;
+go
+CREATE PROCEDURE SendMessage
+    @CurrentUserPhone INT,
+    @MessageContent NVARCHAR(MAX),
+    @ReceiverPhone INT = NULL,
+    @ReceiverGroupId INT = NULL
+AS
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM users WHERE phone = @CurrentUserPhone)
+    BEGIN
+        RAISERROR ('المستخدم غير موجود', 16, 1);
+        RETURN;
+    END
+
+    IF @ReceiverPhone IS NOT NULL AND NOT EXISTS (SELECT 1 FROM users WHERE phone = @ReceiverPhone)
+    BEGIN
+        RAISERROR ('المستلم غير موجود', 16, 1);
+        RETURN;
+    END
+
+    IF @ReceiverGroupId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM groups WHERE id = @ReceiverGroupId)
+    BEGIN
+        RAISERROR ('المجموعة غير موجودة', 16, 1);
+        RETURN;
+    END
+
+    INSERT INTO messages (containts, startDate, sendPhone, recivePhone, reciveGroupId)
+    VALUES (@MessageContent, GETDATE(), @CurrentUserPhone, @ReceiverPhone, @ReceiverGroupId);
+END;
+go
+CREATE PROCEDURE UploadMessageAttachment
+    @MessageId INT,
+    @AttachmentType NVARCHAR(20), -- 'image', 'voice', 'video'
+    @FilePath NVARCHAR(MAX),
+    @FileSize INT
+AS
+BEGIN
+    INSERT INTO MessageAttachments (messageId, attachmentType, filePath, fileSize)
+    VALUES (@MessageId, @AttachmentType, @FilePath, @FileSize);
+END;
+go
+CREATE PROCEDURE GetUserStatus
+    @UserPhone INT
+AS
+BEGIN
+    SELECT status, lastUpdate
+    FROM UserStatus
+    WHERE userPhone = @UserPhone;
+END;
+go
+CREATE PROCEDURE SetUserStatus
+    @UserPhone INT,
+    @Status NVARCHAR(20)
+AS
+BEGIN
+    IF EXISTS (SELECT 1 FROM UserStatus WHERE userPhone = @UserPhone)
+    BEGIN
+        UPDATE UserStatus
+        SET status = @Status, lastUpdate = GETDATE()
+        WHERE userPhone = @UserPhone;
+    END
+    ELSE
+    BEGIN
+        INSERT INTO UserStatus (userPhone, status)
+        VALUES (@UserPhone, @Status);
+    END
+END;
+go
+CREATE PROCEDURE SetUserStatus
+    @UserPhone INT,
+    @Status NVARCHAR(20)
+AS
+BEGIN
+    IF EXISTS (SELECT 1 FROM UserStatus WHERE userPhone = @UserPhone)
+    BEGIN
+        UPDATE UserStatus
+        SET status = @Status, lastUpdate = GETDATE()
+        WHERE userPhone = @UserPhone;
+    END
+    ELSE
+    BEGIN
+        INSERT INTO UserStatus (userPhone, status)
+        VALUES (@UserPhone, @Status);
+    END
+END;
+go
+CREATE PROCEDURE UnblockUser
+    @BlockerPhone INT,
+    @BlockedPhone INT
+AS
+BEGIN
+    DELETE FROM UserBlocked
+    WHERE blockerPhone = @BlockerPhone AND blockedPhone = @BlockedPhone;
+END;
+go
+CREATE PROCEDURE MarkMessageAsRead
+    @MessageId INT,
+    @UserPhone INT
+AS
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM MessageReadStatus WHERE messageId = @MessageId AND userPhone = @UserPhone)
+    BEGIN
+        INSERT INTO MessageReadStatus (messageId, userPhone, readStatus, readDate)
+        VALUES (@MessageId, @UserPhone, 1, GETDATE());
+    END
+    ELSE
+    BEGIN
+        UPDATE MessageReadStatus
+        SET readStatus = 1, readDate = GETDATE()
+        WHERE messageId = @MessageId AND userPhone = @UserPhone;
+    END
+END;
+INSERT INTO users (phone, name, password, img, permission, active, information, elesName, publicType, userCode) VALUES
+(730000001, 'Ahmed', 'pass123', 'ahmed.jpg', 1, 1, 'مهندس برمجيات', 'AhmedDev', 1, 101),
+(770000002, 'Khaled', 'pass123', 'khaled.jpg', 1, 1, 'طبيب عام', 'KhaledDr', 1, 102),
+(780000003, 'Fatima', 'pass123', 'fatima.jpg', 1, 1, 'مصممة جرافيك', 'FatimaArt', 0, 103),
+(710000004, 'Ali', 'pass123', 'ali.jpg', 1, 1, 'محامي', 'AliLaw', 0, 104);
+INSERT INTO groups (name, img) VALUES
+('مجموعة العمل', 'workgroup.jpg'),
+('الأصدقاء', 'friends.jpg');
+INSERT INTO memeparsGroups (userPhone, groupId, type) VALUES
+-- مجموعة العمل
+(730000001, 1, 'admin'),
+(770000002, 1, 'member'),
+(780000003, 1, 'member'),
+
+-- مجموعة الأصدقاء
+(710000004, 2, 'admin'),
+(780000003, 2, 'member'),
+(770000002, 2, 'member');
+INSERT INTO messages (containts, status,  startDate, reciveDate, sendPhone, recivePhone, reciveGroupId) VALUES
+-- محادثات خاصة بين شخصين
+('مرحبًا، كيف حالك؟', 'read', '2025-02-22 10:00:00', '2025-02-22 10:01:00', 730000001, 770000002, NULL),
+('أنا بخير، وأنت؟', 'unread',  '2025-02-22 10:05:00', '2025-02-22 10:06:00', 770000002, 730000001, NULL),
+('هل يمكنك إرسال الملف؟', 'read', '2025-02-22 10:07:00', '2025-02-22 10:08:00', 730000001, 770000002, NULL),
+
+-- محادثات مجموعات
+('مرحبًا بالجميع! 🌟', 'read','2025-02-22 09:50:00', '2025-02-22 09:51:00', 730000001, NULL, 1),
+(NULL, 'read', '2025-02-22 10:10:00', '2025-02-22 10:11:00', 780000003, NULL, 1),
+--(NULL, 'unread', NULL, 'voice1.mp3', NULL, NULL, '2025-02-22 10:15:00', '2025-02-22 10:16:00', 710000004, NULL, 1),
+('متى الاجتماع القادم؟', 'unread',  '2025-02-22 10:20:00', '2025-02-22 10:21:00', 770000002, NULL, 2);
+execute GetChatList @CurrentUserPhone=730000001;
